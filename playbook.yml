@@ -1,0 +1,7 @@
+---
+- name: Exercise for setting up web server in EC2 Instance
+  hosts: all
+  user: ubuntu
+  roles:
+    - setup
+

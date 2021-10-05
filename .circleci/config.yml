@@ -1,0 +1,140 @@
+version: 2.1
+
+commands:
+  destroy_environment:
+    steps:
+      - run:
+          name: Destroy Environment
+          command: |
+            aws cloudformation delete-stack --stack-name cicd-infrastructure
+          when: on_fail
+
+
+orbs:
+  aws-cli: circleci/aws-cli@2.0.3
+
+jobs:
+  build:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run: npm i
+      - save_cache:
+          key: "npm packages"
+          paths:
+            - /src/node-modules
+      - run: npm run lint
+
+  test:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: 
+            - "npm-packages"
+      - run: npm i
+      - run: npm run test
+
+  analyze:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: 
+            - "npm-packages"
+      - run: npm audit
+
+  create_infrastructure:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Create Cloudformation stack
+          command: |
+            aws cloudformation create-stack \
+              --stack-name cicd-infrastructure \
+              --template-body file://infra.yml \
+              --region $AWS_DEFAULT_REGION
+
+  get_resource_ips:
+    docker:
+      - image: cimg/base:stable
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Get Created Resource IP's
+          command: |
+            echo "[all]" > ~/inventory
+            aws ec2 describe-instances --query 'Reservations[*].Instances[*].PublicIpAddress' --output text >> ~/inventory
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - inventory
+      - destroy_environment
+
+  config_deploy:
+    docker:
+      - image: cimg/base:stable
+      - image: python:3.7-alpine3.11
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints: [21:c8:e7:41:d8:6c:da:5e:17:32:cf:ca:39:ad:b4:e8]
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: "Get Resource IPs"
+          command: "cat ~/inventory"
+      - run:
+          name: Install dependencies
+          command: |
+            apk add --update ansible
+      - run:
+          name: Configure Server
+          command: |
+            ansible-playbook -i inventory playbook.yml
+      - destroy_environment
+
+  smoke_test:
+    docker:
+      - image: alpine:latest
+    steps:
+      - checkout
+      - run:
+          name: Smoke test on Google.com
+          command: |
+            if curl -s --head "https://google.com" 
+            then
+              echo "It worked!"
+            else
+              echo "It failed"
+            fi
+      - destroy_environment
+
+workflows:
+  ci-workflow:
+    jobs:
+      - build
+      - test:
+          requires: 
+            - build
+      # - analyze:
+      #     requires: 
+      #       - test
+      - create_infrastructure
+      - get_resource_ips:
+          requires:
+            - create_infrastructure      
+      - config_deploy:
+          requires:
+            - get_resource_ips
+      - smoke_test:
+          requires:
+            - config_deploy
+
